@@ -11,7 +11,11 @@ use sdkey::{Client, SdkeyError};
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("[{}] {}", err.code, err.message);
+        if let Some(ref server_code) = err.server_code {
+            eprintln!("[{}] ({}) {}", err.code, server_code, err.message);
+        } else {
+            eprintln!("[{}] {}", err.code, err.message);
+        }
         process::exit(1);
     }
 }
@@ -29,6 +33,13 @@ fn run() -> Result<(), SdkeyError> {
 
     let mut client = Client::new(api_base_url, app_id, app_version, app_public_key_b64);
     let result = client.validate(&license_key, hwid.as_deref())?;
-    println!("{result:?}");
+    if result.success {
+        println!(
+            "licensed {:?} tier={} {:?}",
+            result.status, result.subscription_tier, result.expires_at
+        );
+    } else {
+        println!("denied {} {}", result.code, result.message);
+    }
     Ok(())
 }

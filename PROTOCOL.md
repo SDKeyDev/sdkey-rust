@@ -9,8 +9,9 @@ Wire protocol for official SDKey clients (TypeScript, Python, Rust, …). All la
 
 | Constant | Description |
 |---|---|
-| `API_BASE_URL` | e.g. `https://api.sdkey.dev` |
+| `API_BASE_URL` | e.g. `https://api.sdkey.dev` (no trailing slash) |
 | `APP_ID` | Application UUID |
+| `APP_VERSION` | Exact app version string (must match `applications.version`) |
 | `APP_PUBLIC_KEY` | Ed25519 public key, 32 raw bytes (or base64 of those bytes) |
 
 ## Algorithms
@@ -39,10 +40,16 @@ OKM  = HKDF-SHA256(IKM, salt, info, length=32)
 Request:
 
 ```json
-{ "appId": "<uuid>", "clientNonceB64": "<base64 32 bytes>" }
+{
+  "appId": "<uuid>",
+  "clientNonceB64": "<base64 32 bytes>",
+  "clientVersion": "<exact app version>"
+}
 ```
 
-Response:
+`clientVersion` must exactly match the application's configured version. Mismatch → `APP_OUTDATED`. Banned client IP → `IP_BANNED`. Disabled app → `APP_DISABLED`.
+
+Success response (no `message` field):
 
 ```json
 {
@@ -53,6 +60,16 @@ Response:
   "timestamp": 1720000000,
   "signatureB64": "...",
   "v": 1
+}
+```
+
+Failures are plaintext JSON. Customizable text for `APP_DISABLED` / `APP_OUTDATED` / `IP_BANNED` is in `error`:
+
+```json
+{
+  "success": false,
+  "error": "Client version outdated",
+  "code": "APP_OUTDATED"
 }
 ```
 
@@ -84,7 +101,18 @@ Outer request envelope (HTTPS JSON):
 }
 ```
 
-Inner plaintext (before AES-GCM seal):
+Inner plaintext (before AES-GCM seal) — omit `hwid` entirely when unused:
+
+```json
+{
+  "licenseKey": "SDKY-....",
+  "nonce": "<base64 16 bytes>",
+  "timestamp": 1720000001,
+  "v": 1
+}
+```
+
+With HWID:
 
 ```json
 {
@@ -95,6 +123,8 @@ Inner plaintext (before AES-GCM seal):
   "v": 1
 }
 ```
+
+`hwid` is **optional**. When omitted, the server skips HWID lock, HWID mismatch, and HWID-ban checks. IP bans apply regardless of HWID.
 
 Response envelope:
 
@@ -108,6 +138,37 @@ Response envelope:
 }
 ```
 
+After AES-GCM open, **both success and failure plaintext include `message`** (not a top-level `error`). Success also includes integer `subscriptionTier` (≥ 0; default `0`):
+
+```json
+{
+  "success": true,
+  "code": "OK",
+  "message": "validated",
+  "status": "active",
+  "expiresAt": "2026-01-01T00:00:00.000Z",
+  "subscriptionTier": 0,
+  "sessionId": "...",
+  "timestamp": 1720000001,
+  "v": 1
+}
+```
+
+Sealed failure plaintext example:
+
+```json
+{
+  "success": false,
+  "code": "HWID_MISMATCH",
+  "message": "Hardware ID mismatch",
+  "status": null,
+  "expiresAt": null,
+  "sessionId": "...",
+  "timestamp": 1720000001,
+  "v": 1
+}
+```
+
 **Client order of operations (mandatory):**
 
 1. AES-GCM open → plaintext JSON
@@ -117,11 +178,113 @@ Response envelope:
 
 Skipping step 2 defeats anti-spoof protection.
 
-## Failure codes (sealed `success: false`)
+## Public client auth (plaintext JSON)
 
-`SESSION_EXPIRED`, `CLOCK_SKEW`, `REPLAY`, `LICENSE_NOT_FOUND`, `APP_MISMATCH`, `BANNED`, `EXPIRED`, `HWID_MISMATCH`, `DECRYPT_FAIL`, `APP_DISABLED`
+These endpoints are **not** sealed. They still require `appId` + `clientVersion` (exact match). Optional `hwid` follows the same omit-when-absent rules as validate. Rate limit: 30 / min / IP. Opaque `sessionToken` TTL: 7 days.
+
+### `POST /api/v1/client/register`
+
+```json
+{
+  "appId": "<uuid>",
+  "username": "player1",
+  "password": "••••••••",
+  "email": "optional@example.com",
+  "licenseKey": "SDKY-....",
+  "hwid": "...",
+  "clientVersion": "1.0.0"
+}
+```
+
+HTTP `201` on success.
+
+### `POST /api/v1/client/login`
+
+```json
+{
+  "appId": "<uuid>",
+  "username": "player1",
+  "password": "••••••••",
+  "hwid": "...",
+  "clientVersion": "1.0.0"
+}
+```
+
+### `POST /api/v1/client/upgrade`
+
+Upgrade the user's linked license with a higher-tier key. **No password** — username + new key only. New key's `subscriptionTier` must be **greater than** the user's current tier (no linked license → current = `0`).
+
+```json
+{
+  "appId": "<uuid>",
+  "username": "player1",
+  "licenseKey": "SDKY-....",
+  "hwid": "...",
+  "clientVersion": "1.0.0"
+}
+```
+
+### Auth success shape
+
+Success has **no** customizable `message` field:
+
+```json
+{
+  "success": true,
+  "sessionToken": "<opaque>",
+  "expiresAt": "2026-01-01T00:00:00.000Z",
+  "user": {
+    "id": "<uuid>",
+    "username": "player1",
+    "email": null,
+    "applicationId": "<uuid>"
+  },
+  "license": {
+    "id": "<uuid>",
+    "status": "active",
+    "expiresAt": null,
+    "subscriptionTier": 1
+  },
+  "session": {
+    "ip": "203.0.113.1",
+    "hwid": "..."
+  }
+}
+```
+
+`license` may be `null` when the user has no linked license.
+
+### Auth failure shape
+
+Customizable text is in **`error`** (not `message`):
+
+```json
+{
+  "success": false,
+  "error": "License tier must be higher than the current tier",
+  "code": "TIER_NOT_HIGHER"
+}
+```
+
+## Where custom messages appear
+
+| Surface | Success text field | Failure text field |
+|---|---|---|
+| Session init | *(none)* | `error` |
+| Sealed validate | `message` | `message` |
+| Client register/login/upgrade | *(none)* | `error` |
+
+## Failure codes
+
+### Sealed validate / crypto session
+
+`SESSION_EXPIRED`, `CLOCK_SKEW`, `REPLAY`, `LICENSE_NOT_FOUND`, `APP_MISMATCH`, `BANNED`, `EXPIRED`, `HWID_MISMATCH`, `DECRYPT_FAIL`, `APP_DISABLED`, `APP_OUTDATED`, `HWID_BANNED`, `IP_BANNED`
 
 Cryptographic protocol failures after a valid session typically return HTTP **200** with a sealed body so clients always take the decrypt/verify path.
+
+### Client auth
+
+Also: `LICENSE_REQUIRED`, `INVALID_CREDENTIALS`, `USERNAME_TAKEN`, `USER_NOT_FOUND`, `TIER_NOT_HIGHER`, plus shared codes such as `APP_OUTDATED`, `APP_DISABLED`, `IP_BANNED`, `HWID_BANNED`, `LICENSE_NOT_FOUND`, `BANNED`, `EXPIRED`, `APP_MISMATCH`, `HWID_MISMATCH`.
 
 ## Threat model notes
 
@@ -131,3 +294,7 @@ Cryptographic protocol failures after a valid session typically return HTTP **20
 ## Account modes vs validate wire format
 
 Dashboard Private mode does **not** change this validate protocol. Sealed validate still sends plaintext `licenseKey` inside the AES-GCM inner payload.
+
+## Developer tooling (not part of this client SDK)
+
+Bearer `sdk_live_…` management APIs (create licenses, bans, app settings) are out of scope for this crate.
