@@ -11,6 +11,7 @@ pub enum SdkeyErrorCode {
     ResponseSignatureInvalid,
     SessionMismatch,
     ClockSkew,
+    AuthFailed,
     Network,
     Unknown,
 }
@@ -25,6 +26,7 @@ impl SdkeyErrorCode {
             Self::ResponseSignatureInvalid => "RESPONSE_SIGNATURE_INVALID",
             Self::SessionMismatch => "SESSION_MISMATCH",
             Self::ClockSkew => "CLOCK_SKEW",
+            Self::AuthFailed => "AUTH_FAILED",
             Self::Network => "NETWORK",
             Self::Unknown => "UNKNOWN",
         }
@@ -41,9 +43,9 @@ impl fmt::Display for SdkeyErrorCode {
 #[derive(Debug, thiserror::Error)]
 pub struct SdkeyError {
     pub code: SdkeyErrorCode,
-    /// Local or server-provided human-readable text (`error` field from init).
+    /// Local or server-provided human-readable text (`error` field from init/auth).
     pub message: String,
-    /// Server `code` when present (e.g. `APP_OUTDATED`).
+    /// Server `code` when present (e.g. `APP_OUTDATED`, `TIER_NOT_HIGHER`).
     pub server_code: Option<String>,
     #[source]
     pub source: Option<Box<dyn std::error::Error + Send + Sync>>,

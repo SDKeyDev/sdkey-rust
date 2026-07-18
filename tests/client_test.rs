@@ -6,7 +6,7 @@ use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use sdkey::{
     base64_to_bytes, bytes_to_base64, canonical_json, derive_session_aes_key, open_aes_gcm,
-    seal_aes_gcm, Client, SdkeyErrorCode,
+    seal_aes_gcm, Client, LoginOptions, RegisterOptions, SdkeyErrorCode, UpgradeOptions,
     PROTOCOL_VERSION,
 };
 
@@ -317,3 +317,170 @@ fn throws_sdkey_error_when_hello_signature_is_wrong() {
     assert_eq!(err.code, SdkeyErrorCode::HelloSignatureInvalid);
 }
 
+#[test]
+fn register_login_upgrade_plaintext_auth() {
+    let captured: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_http = Arc::clone(&captured);
+
+    let http_post = Box::new(move |url: &str, body: &Value| {
+        captured_for_http
+            .lock()
+            .unwrap()
+            .push((url.to_string(), body.clone()));
+
+        if url.ends_with("/api/v1/client/register") {
+            return Ok((
+                201,
+                json!({
+                    "success": true,
+                    "sessionToken": "tok-register",
+                    "expiresAt": "2026-01-01T00:00:00.000Z",
+                    "user": {
+                        "id": "user-1",
+                        "username": "player1",
+                        "email": "a@example.com",
+                        "applicationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                    },
+                    "license": {
+                        "id": "lic-1",
+                        "status": "active",
+                        "expiresAt": null,
+                        "subscriptionTier": 1
+                    },
+                    "session": { "ip": "203.0.113.1", "hwid": "hw-1" }
+                }),
+            ));
+        }
+
+        if url.ends_with("/api/v1/client/login") {
+            return Ok((
+                200,
+                json!({
+                    "success": true,
+                    "sessionToken": "tok-login",
+                    "expiresAt": "2026-01-01T00:00:00.000Z",
+                    "user": {
+                        "id": "user-1",
+                        "username": "player1",
+                        "email": null,
+                        "applicationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                    },
+                    "license": null,
+                    "session": { "ip": "203.0.113.1", "hwid": null }
+                }),
+            ));
+        }
+
+        if url.ends_with("/api/v1/client/upgrade") {
+            assert!(body.get("password").is_none());
+            return Ok((
+                200,
+                json!({
+                    "success": true,
+                    "sessionToken": "tok-upgrade",
+                    "expiresAt": "2026-01-01T00:00:00.000Z",
+                    "user": {
+                        "id": "user-1",
+                        "username": "player1",
+                        "email": null,
+                        "applicationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                    },
+                    "license": {
+                        "id": "lic-2",
+                        "status": "active",
+                        "expiresAt": null,
+                        "subscriptionTier": 3
+                    },
+                    "session": { "ip": "203.0.113.1", "hwid": "hw-1" }
+                }),
+            ));
+        }
+
+        Ok((404, json!({"error": "not found"})))
+    });
+
+    let client = Client::with_http_post(
+        "https://api.example.test",
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "1.0.0",
+        bytes_to_base64(&[0u8; 32]),
+        http_post,
+    );
+
+    let registered = client
+        .register(&RegisterOptions {
+            username: "player1".into(),
+            password: "password123".into(),
+            email: Some("a@example.com".into()),
+            license_key: Some("SDKY-AAAA".into()),
+            hwid: Some("hw-1".into()),
+        })
+        .unwrap();
+    assert_eq!(registered.session_token, "tok-register");
+    assert_eq!(registered.user.username, "player1");
+    assert_eq!(registered.license.as_ref().unwrap().subscription_tier, 1);
+
+    let logged_in = client
+        .login(&LoginOptions {
+            username: "player1".into(),
+            password: "password123".into(),
+            hwid: None,
+        })
+        .unwrap();
+    assert_eq!(logged_in.session_token, "tok-login");
+    assert!(logged_in.license.is_none());
+
+    let upgraded = client
+        .upgrade(&UpgradeOptions {
+            username: "player1".into(),
+            license_key: "SDKY-BBBB".into(),
+            hwid: Some("hw-1".into()),
+        })
+        .unwrap();
+    assert_eq!(upgraded.session_token, "tok-upgrade");
+    assert_eq!(upgraded.license.as_ref().unwrap().subscription_tier, 3);
+
+    let calls = captured.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].1["clientVersion"], "1.0.0");
+    assert_eq!(calls[0].1["appId"], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    assert!(calls[1].1.get("hwid").is_none());
+    assert!(calls[2].1.get("password").is_none());
+    assert_eq!(calls[2].1["licenseKey"], "SDKY-BBBB");
+}
+
+#[test]
+fn auth_failure_surfaces_server_error_and_code() {
+    let http_post = Box::new(move |_url: &str, _body: &Value| {
+        Ok((
+            403,
+            json!({
+                "success": false,
+                "error": "License tier must be higher than the current tier",
+                "code": "TIER_NOT_HIGHER",
+            }),
+        ))
+    });
+
+    let client = Client::with_http_post(
+        "https://api.example.test",
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "1.0.0",
+        bytes_to_base64(&[0u8; 32]),
+        http_post,
+    );
+
+    let err = client
+        .upgrade(&UpgradeOptions {
+            username: "player1".into(),
+            license_key: "SDKY-LOW".into(),
+            hwid: None,
+        })
+        .unwrap_err();
+    assert_eq!(err.code, SdkeyErrorCode::AuthFailed);
+    assert_eq!(
+        err.message,
+        "License tier must be higher than the current tier"
+    );
+    assert_eq!(err.server_code.as_deref(), Some("TIER_NOT_HIGHER"));
+}

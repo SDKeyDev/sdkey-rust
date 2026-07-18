@@ -1,4 +1,4 @@
-//! SDKey license client (sealed session protocol).
+//! SDKey license client (sealed session protocol + plaintext client auth).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,10 @@ use crate::crypto::seal::{
     derive_session_aes_key, import_public_key, open_aes_gcm, seal_aes_gcm, verify_signature_value,
 };
 use crate::errors::{SdkeyError, SdkeyErrorCode};
-use crate::types::{HttpPost, SessionState, ValidateResult};
+use crate::types::{
+    ClientAuthLicense, ClientAuthResult, ClientAuthSession, ClientAuthUser, HttpPost, LoginOptions,
+    RegisterOptions, SessionState, UpgradeOptions, ValidateResult,
+};
 
 /// Default HTTPS JSON POST using `ureq`.
 fn default_http_post(
@@ -46,6 +49,8 @@ fn default_http_post(
 ///
 /// Flow: `init()` (session handshake) → `validate(license_key, hwid)` (sealed request).
 /// `validate` calls `init` automatically when no session exists.
+///
+/// Plaintext client auth (`register` / `login` / `upgrade`) does not use the sealed session.
 pub struct Client {
     api_base_url: String,
     app_id: String,
@@ -344,6 +349,90 @@ impl Client {
             timestamp,
         })
     }
+
+    /// Register a new user (`POST /api/v1/client/register`). Plaintext JSON; not sealed.
+    pub fn register(&self, options: &RegisterOptions) -> Result<ClientAuthResult, SdkeyError> {
+        let mut body = Map::new();
+        body.insert("appId".to_string(), Value::String(self.app_id.clone()));
+        body.insert("username".to_string(), Value::String(options.username.clone()));
+        body.insert("password".to_string(), Value::String(options.password.clone()));
+        body.insert(
+            "clientVersion".to_string(),
+            Value::String(self.app_version.clone()),
+        );
+        if let Some(ref email) = options.email {
+            body.insert("email".to_string(), Value::String(email.clone()));
+        }
+        if let Some(ref license_key) = options.license_key {
+            body.insert("licenseKey".to_string(), Value::String(license_key.clone()));
+        }
+        if let Some(ref hwid) = options.hwid {
+            body.insert("hwid".to_string(), Value::String(hwid.clone()));
+        }
+        self.client_auth("register", Value::Object(body))
+    }
+
+    /// Log in an existing user (`POST /api/v1/client/login`). Plaintext JSON; not sealed.
+    pub fn login(&self, options: &LoginOptions) -> Result<ClientAuthResult, SdkeyError> {
+        let mut body = Map::new();
+        body.insert("appId".to_string(), Value::String(self.app_id.clone()));
+        body.insert("username".to_string(), Value::String(options.username.clone()));
+        body.insert("password".to_string(), Value::String(options.password.clone()));
+        body.insert(
+            "clientVersion".to_string(),
+            Value::String(self.app_version.clone()),
+        );
+        if let Some(ref hwid) = options.hwid {
+            body.insert("hwid".to_string(), Value::String(hwid.clone()));
+        }
+        self.client_auth("login", Value::Object(body))
+    }
+
+    /// Upgrade linked license (`POST /api/v1/client/upgrade`).
+    ///
+    /// Username + license key only — **no password**. Plaintext JSON; not sealed.
+    pub fn upgrade(&self, options: &UpgradeOptions) -> Result<ClientAuthResult, SdkeyError> {
+        let mut body = Map::new();
+        body.insert("appId".to_string(), Value::String(self.app_id.clone()));
+        body.insert("username".to_string(), Value::String(options.username.clone()));
+        body.insert(
+            "licenseKey".to_string(),
+            Value::String(options.license_key.clone()),
+        );
+        body.insert(
+            "clientVersion".to_string(),
+            Value::String(self.app_version.clone()),
+        );
+        if let Some(ref hwid) = options.hwid {
+            body.insert("hwid".to_string(), Value::String(hwid.clone()));
+        }
+        self.client_auth("upgrade", Value::Object(body))
+    }
+
+    fn client_auth(&self, action: &str, body: Value) -> Result<ClientAuthResult, SdkeyError> {
+        let url = format!("{}/api/v1/client/{}", self.api_base_url, action);
+        let (status, response) = (self.http_post)(&url, &body).map_err(|cause| {
+            SdkeyError::with_source(
+                SdkeyErrorCode::Network,
+                format!("{action} request failed"),
+                cause,
+            )
+        })?;
+
+        let success = response
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !(200..300).contains(&status) || !success {
+            return Err(plaintext_failure(
+                SdkeyErrorCode::AuthFailed,
+                &response,
+                format!("{action} failed"),
+            ));
+        }
+
+        parse_client_auth_result(&response)
+    }
 }
 
 fn plaintext_failure(
@@ -361,6 +450,57 @@ fn plaintext_failure(
         .and_then(|v| v.as_str())
         .map(str::to_string);
     SdkeyError::with_server_code(code, message, server_code)
+}
+
+fn parse_client_auth_result(body: &Value) -> Result<ClientAuthResult, SdkeyError> {
+    let session_token = required_str(body, "sessionToken", SdkeyErrorCode::AuthFailed)?.to_string();
+    let expires_at = required_str(body, "expiresAt", SdkeyErrorCode::AuthFailed)?.to_string();
+
+    let user_obj = body.get("user").ok_or_else(|| {
+        SdkeyError::new(SdkeyErrorCode::AuthFailed, "missing user in auth response")
+    })?;
+    let user = ClientAuthUser {
+        id: required_str(user_obj, "id", SdkeyErrorCode::AuthFailed)?.to_string(),
+        username: required_str(user_obj, "username", SdkeyErrorCode::AuthFailed)?.to_string(),
+        email: optional_string(user_obj.get("email")),
+        application_id: required_str(user_obj, "applicationId", SdkeyErrorCode::AuthFailed)?
+            .to_string(),
+    };
+
+    let license = match body.get("license") {
+        None | Some(Value::Null) => None,
+        Some(lic) => Some(ClientAuthLicense {
+            id: required_str(lic, "id", SdkeyErrorCode::AuthFailed)?.to_string(),
+            status: required_str(lic, "status", SdkeyErrorCode::AuthFailed)?.to_string(),
+            expires_at: optional_string(lic.get("expiresAt")),
+            subscription_tier: lic
+                .get("subscriptionTier")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+        }),
+    };
+
+    let session_obj = body.get("session").unwrap_or(&Value::Null);
+    let session = ClientAuthSession {
+        ip: optional_string(session_obj.get("ip")),
+        hwid: optional_string(session_obj.get("hwid")),
+    };
+
+    Ok(ClientAuthResult {
+        success: true,
+        session_token,
+        expires_at,
+        user,
+        license,
+        session,
+    })
+}
+
+fn optional_string(value: Option<&Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(v) => v.as_str().map(str::to_string),
+    }
 }
 
 fn required_str<'a>(

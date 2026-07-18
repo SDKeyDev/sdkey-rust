@@ -34,3 +34,65 @@ pub struct ValidateResult {
     pub subscription_tier: i64,
     pub timestamp: i64,
 }
+
+/// Options for [`crate::Client::register`].
+#[derive(Debug, Clone)]
+pub struct RegisterOptions {
+    pub username: String,
+    pub password: String,
+    pub email: Option<String>,
+    pub license_key: Option<String>,
+    pub hwid: Option<String>,
+}
+
+/// Options for [`crate::Client::login`].
+#[derive(Debug, Clone)]
+pub struct LoginOptions {
+    pub username: String,
+    pub password: String,
+    pub hwid: Option<String>,
+}
+
+/// Options for [`crate::Client::upgrade`] (username + license key only; no password).
+#[derive(Debug, Clone)]
+pub struct UpgradeOptions {
+    pub username: String,
+    pub license_key: String,
+    pub hwid: Option<String>,
+}
+
+/// User object returned by client auth success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientAuthUser {
+    pub id: String,
+    pub username: String,
+    pub email: Option<String>,
+    pub application_id: String,
+}
+
+/// License object returned by client auth success (`null` when unlinked).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientAuthLicense {
+    pub id: String,
+    pub status: String,
+    pub expires_at: Option<String>,
+    pub subscription_tier: i64,
+}
+
+/// Session metadata returned by client auth success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientAuthSession {
+    pub ip: Option<String>,
+    pub hwid: Option<String>,
+}
+
+/// Success result of `register` / `login` / `upgrade` (plaintext client auth).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientAuthResult {
+    pub success: bool,
+    pub session_token: String,
+    pub expires_at: String,
+    pub user: ClientAuthUser,
+    pub license: Option<ClientAuthLicense>,
+    pub session: ClientAuthSession,
+}

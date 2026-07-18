@@ -1,7 +1,8 @@
 //! Official Rust client for the SDKey license authentication protocol.
 //!
 //! Implements the sealed session protocol: Ed25519-verified handshake,
-//! HKDF session keys, and AES-256-GCM validate envelopes. See `PROTOCOL.md`.
+//! HKDF session keys, and AES-256-GCM validate envelopes, plus plaintext
+//! client auth (register / login / upgrade). See `PROTOCOL.md`.
 
 pub mod client;
 pub mod crypto;
@@ -10,7 +11,10 @@ pub mod types;
 
 pub use client::Client;
 pub use errors::{SdkeyError, SdkeyErrorCode};
-pub use types::{HttpPost, SessionState, ValidateResult};
+pub use types::{
+    ClientAuthLicense, ClientAuthResult, ClientAuthSession, ClientAuthUser, HttpPost, LoginOptions,
+    RegisterOptions, SessionState, UpgradeOptions, ValidateResult,
+};
 
 pub use crypto::constants::{
     AES_GCM_IV_BYTES, CLIENT_NONCE_BYTES, CLOCK_SKEW_SECONDS, PROTOCOL_VERSION,
