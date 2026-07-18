@@ -7,9 +7,14 @@ license = "MIT"
 description = "Official Rust client for the SDKey license authentication protocol"
 repository = "https://github.com/SDKeyDev/sdkey-rust"
 homepage = "https://docs.sdkey.dev"
+readme = "README.md"
 keywords = ["sdkey", "license", "authentication", "ed25519"]
 categories = ["authentication", "cryptography", "api-bindings"]
 exclude = [".github/"]
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
 
 [dependencies]
 aes-gcm = "0.10"
