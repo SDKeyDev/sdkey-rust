@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::VerifyingKey;
 use rand::RngCore;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::crypto::constants::{
     CLIENT_NONCE_BYTES, CLOCK_SKEW_SECONDS, PROTOCOL_VERSION, VALIDATE_NONCE_BYTES,
@@ -49,6 +49,7 @@ fn default_http_post(
 pub struct Client {
     api_base_url: String,
     app_id: String,
+    app_version: String,
     app_public_key_b64: String,
     http_post: HttpPost,
     public_key: Option<VerifyingKey>,
@@ -57,24 +58,35 @@ pub struct Client {
 
 impl Client {
     /// Create a client. Trailing slashes on `api_base_url` are stripped.
+    ///
+    /// `app_version` is sent as `clientVersion` and must exactly match the app's configured version.
     pub fn new(
         api_base_url: impl Into<String>,
         app_id: impl Into<String>,
+        app_version: impl Into<String>,
         app_public_key_b64: impl Into<String>,
     ) -> Self {
-        Self::with_http_post(api_base_url, app_id, app_public_key_b64, Box::new(default_http_post))
+        Self::with_http_post(
+            api_base_url,
+            app_id,
+            app_version,
+            app_public_key_b64,
+            Box::new(default_http_post),
+        )
     }
 
     /// Create a client with an injectable HTTP POST (for tests / custom transport).
     pub fn with_http_post(
         api_base_url: impl Into<String>,
         app_id: impl Into<String>,
+        app_version: impl Into<String>,
         app_public_key_b64: impl Into<String>,
         http_post: HttpPost,
     ) -> Self {
         Self {
             api_base_url: api_base_url.into().trim_end_matches('/').to_string(),
             app_id: app_id.into(),
+            app_version: app_version.into(),
             app_public_key_b64: app_public_key_b64.into(),
             http_post,
             public_key: None,
@@ -106,6 +118,7 @@ impl Client {
         let body = json!({
             "appId": self.app_id,
             "clientNonceB64": bytes_to_base64(&client_nonce),
+            "clientVersion": self.app_version,
         });
 
         let (status, body) = (self.http_post)(&url, &body).map_err(|cause| {
@@ -118,23 +131,23 @@ impl Client {
 
         let success = body.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
         if !(200..300).contains(&status) || !success {
-            let msg = body
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("session init failed");
-            return Err(SdkeyError::new(SdkeyErrorCode::InitFailed, msg));
+            return Err(plaintext_failure(
+                SdkeyErrorCode::InitFailed,
+                &body,
+                "session init failed",
+            ));
         }
 
-        let hkdf_salt_b64 = required_str(&body, "hkdfSaltB64")?;
-        let server_nonce_b64 = required_str(&body, "serverNonceB64")?;
-        let session_id = required_str(&body, "sessionId")?;
+        let hkdf_salt_b64 = required_str(&body, "hkdfSaltB64", SdkeyErrorCode::InitFailed)?;
+        let server_nonce_b64 = required_str(&body, "serverNonceB64", SdkeyErrorCode::InitFailed)?;
+        let session_id = required_str(&body, "sessionId", SdkeyErrorCode::InitFailed)?;
         let timestamp = body
             .get("timestamp")
             .and_then(|v| v.as_i64())
             .ok_or_else(|| {
                 SdkeyError::new(SdkeyErrorCode::InitFailed, "missing hello timestamp")
             })?;
-        let signature_b64 = required_str(&body, "signatureB64")?;
+        let signature_b64 = required_str(&body, "signatureB64", SdkeyErrorCode::InitFailed)?;
 
         let hello = json!({
             "appId": self.app_id,
@@ -176,12 +189,13 @@ impl Client {
 
     /// Sealed validate; always decrypts then verifies Ed25519 before trusting `success`.
     ///
+    /// `hwid` is optional — omit (`None`) for web clients so the server skips HWID checks.
     /// License denials return `Ok(ValidateResult { success: false, ... })`.
     /// Protocol / transport failures return `Err(SdkeyError)`.
     pub fn validate(
         &mut self,
         license_key: &str,
-        hwid: &str,
+        hwid: Option<&str>,
     ) -> Result<ValidateResult, SdkeyError> {
         if self.session.is_none() || self.public_key.is_none() {
             self.init()?;
@@ -193,17 +207,21 @@ impl Client {
         rand::thread_rng().fill_bytes(&mut validate_nonce);
         let now = unix_now();
 
-        let inner = json!({
-            "hwid": hwid,
-            "licenseKey": license_key,
-            "nonce": bytes_to_base64(&validate_nonce),
-            "timestamp": now,
-            "v": PROTOCOL_VERSION,
-        });
-        let plaintext = serde_json::to_vec(&inner).map_err(|e| {
+        let mut inner = Map::new();
+        if let Some(hwid) = hwid {
+            inner.insert("hwid".to_string(), Value::String(hwid.to_string()));
+        }
+        inner.insert("licenseKey".to_string(), Value::String(license_key.to_string()));
+        inner.insert(
+            "nonce".to_string(),
+            Value::String(bytes_to_base64(&validate_nonce)),
+        );
+        inner.insert("timestamp".to_string(), Value::Number(now.into()));
+        inner.insert("v".to_string(), Value::Number(PROTOCOL_VERSION.into()));
+
+        let plaintext = serde_json::to_vec(&Value::Object(inner)).map_err(|e| {
             SdkeyError::with_source(SdkeyErrorCode::Unknown, "serialize validate payload failed", e)
         })?;
-        // Compact JSON without spaces (serde_json default for to_vec is compact).
         let sealed = seal_aes_gcm(&session.aes_key, &plaintext).map_err(|_| {
             SdkeyError::new(SdkeyErrorCode::Unknown, "seal validate request failed")
         })?;
@@ -233,13 +251,10 @@ impl Client {
             if envelope.get("code").and_then(|v| v.as_str()) == Some("SESSION_EXPIRED") {
                 self.clear_session();
             }
-            let msg = envelope
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("invalid validate response");
-            return Err(SdkeyError::new(
+            return Err(plaintext_failure(
                 SdkeyErrorCode::ValidateResponseInvalid,
-                msg,
+                &envelope,
+                "invalid validate response",
             ));
         }
 
@@ -315,24 +330,47 @@ impl Client {
                 .get("status")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
-            expires_at: plaintext
-                .get("expiresAt")
-                .and_then(|v| {
-                    if v.is_null() {
-                        None
-                    } else {
-                        v.as_str().map(str::to_string)
-                    }
-                }),
+            expires_at: plaintext.get("expiresAt").and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_str().map(str::to_string)
+                }
+            }),
+            subscription_tier: plaintext
+                .get("subscriptionTier")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
             timestamp,
         })
     }
 }
 
-fn required_str<'a>(body: &'a Value, key: &str) -> Result<&'a str, SdkeyError> {
+fn plaintext_failure(
+    code: SdkeyErrorCode,
+    body: &Value,
+    fallback: impl Into<String>,
+) -> SdkeyError {
+    let message = body
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback.into());
+    let server_code = body
+        .get("code")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    SdkeyError::with_server_code(code, message, server_code)
+}
+
+fn required_str<'a>(
+    body: &'a Value,
+    key: &str,
+    code: SdkeyErrorCode,
+) -> Result<&'a str, SdkeyError> {
     body.get(key)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| SdkeyError::new(SdkeyErrorCode::InitFailed, format!("missing {key}")))
+        .ok_or_else(|| SdkeyError::new(code, format!("missing {key}")))
 }
 
 fn unix_now() -> i64 {

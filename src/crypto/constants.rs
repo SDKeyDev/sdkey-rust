@@ -42,4 +42,7 @@ pub const VALIDATE_FAILURE_CODES: &[&str] = &[
     "HWID_MISMATCH",
     "DECRYPT_FAIL",
     "APP_DISABLED",
+    "APP_OUTDATED",
+    "HWID_BANNED",
+    "IP_BANNED",
 ];

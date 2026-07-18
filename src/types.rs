@@ -26,8 +26,11 @@ pub struct SessionState {
 pub struct ValidateResult {
     pub success: bool,
     pub code: String,
+    /// Server `message` (customizable per app) for both success and sealed failure.
     pub message: String,
     pub status: Option<String>,
     pub expires_at: Option<String>,
+    /// License subscription tier (≥ 0). Defaults to `0` when absent.
+    pub subscription_tier: i64,
     pub timestamp: i64,
 }

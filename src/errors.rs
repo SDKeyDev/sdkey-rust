@@ -41,7 +41,10 @@ impl fmt::Display for SdkeyErrorCode {
 #[derive(Debug, thiserror::Error)]
 pub struct SdkeyError {
     pub code: SdkeyErrorCode,
+    /// Local or server-provided human-readable text (`error` field from init).
     pub message: String,
+    /// Server `code` when present (e.g. `APP_OUTDATED`).
+    pub server_code: Option<String>,
     #[source]
     pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
@@ -51,6 +54,20 @@ impl SdkeyError {
         Self {
             code,
             message: message.into(),
+            server_code: None,
+            source: None,
+        }
+    }
+
+    pub fn with_server_code(
+        code: SdkeyErrorCode,
+        message: impl Into<String>,
+        server_code: Option<String>,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            server_code,
             source: None,
         }
     }
@@ -63,6 +80,7 @@ impl SdkeyError {
         Self {
             code,
             message: message.into(),
+            server_code: None,
             source: Some(source.into()),
         }
     }
@@ -70,6 +88,10 @@ impl SdkeyError {
 
 impl fmt::Display for SdkeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code.as_str(), self.message)
+        if let Some(ref server_code) = self.server_code {
+            write!(f, "{} ({}): {}", self.code.as_str(), server_code, self.message)
+        } else {
+            write!(f, "{}: {}", self.code.as_str(), self.message)
+        }
     }
 }
