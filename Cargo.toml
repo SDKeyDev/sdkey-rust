@@ -1,0 +1,24 @@
+[package]
+name = "sdkey"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+license = "MIT"
+description = "Official Rust client for the SDKey license authentication protocol"
+repository = "https://github.com/SDKeyDev/sdkey-rust"
+homepage = "https://docs.sdkey.dev"
+keywords = ["sdkey", "license", "authentication", "ed25519"]
+categories = ["authentication", "cryptography", "api-bindings"]
+exclude = [".github/"]
+
+[dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
+hkdf = "0.12"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+ureq = { version = "2", features = ["json"] }
