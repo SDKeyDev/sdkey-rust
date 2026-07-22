@@ -8,7 +8,7 @@ Implements the sealed session protocol: Ed25519-verified handshake, HKDF session
 
 ```toml
 [dependencies]
-sdkey = "0.2"
+sdkey = "0.3"
 ```
 
 Requires Rust 1.70+.
@@ -18,7 +18,7 @@ Requires Rust 1.70+.
 Embed these values from the SDKey dashboard when you ship your app. `app_version` must **exactly match** the application's configured version (mismatch → `APP_OUTDATED`).
 
 ```rust
-use sdkey::{Client, SdkeyError};
+use sdkey::{get_hardware_id, Client, SdkeyError};
 
 fn main() -> Result<(), SdkeyError> {
     let mut client = Client::new(
@@ -28,8 +28,9 @@ fn main() -> Result<(), SdkeyError> {
         "YOUR_APP_PUBLIC_KEY_BASE64",
     );
 
-    // hwid is optional — use None for web clients (server skips HWID checks)
-    match client.validate("SDKY-XXXX-XXXX-XXXX-XXXX", Some("machine-hwid")) {
+    // Desktop: pass get_hardware_id(); web / server: pass None (server skips HWID checks)
+    let hwid = get_hardware_id()?;
+    match client.validate("SDKY-XXXX-XXXX-XXXX-XXXX", Some(&hwid)) {
         Ok(result) if result.success => {
             println!(
                 "licensed {:?} tier={} {:?}",
@@ -58,7 +59,7 @@ fn main() -> Result<(), SdkeyError> {
 Plaintext JSON against `/api/v1/client/*` — not AES-sealed. Still sends `appId` + `clientVersion`. Optional `hwid` is omitted from JSON when absent.
 
 ```rust
-use sdkey::{Client, LoginOptions, RegisterOptions, UpgradeOptions};
+use sdkey::{get_hardware_id, Client, LoginOptions, RegisterOptions, UpgradeOptions};
 
 let client = Client::new(
     "https://api.sdkey.dev",
@@ -67,12 +68,14 @@ let client = Client::new(
     "YOUR_APP_PUBLIC_KEY_BASE64",
 );
 
+let hwid = get_hardware_id()?;
+
 let registered = client.register(&RegisterOptions {
     username: "player1".into(),
     password: "password123".into(),
     email: Some("player@example.com".into()),
     license_key: Some("SDKY-XXXX-XXXX-XXXX-XXXX".into()),
-    hwid: Some("machine-hwid".into()),
+    hwid: Some(hwid.clone()),
 })?;
 
 let logged_in = client.login(&LoginOptions {
@@ -85,7 +88,7 @@ let logged_in = client.login(&LoginOptions {
 let upgraded = client.upgrade(&UpgradeOptions {
     username: "player1".into(),
     license_key: "SDKY-YYYY-YYYY-YYYY-YYYY".into(),
-    hwid: Some("machine-hwid".into()),
+    hwid: Some(hwid),
 })?;
 
 println!("token {} expires {}", logged_in.session_token, logged_in.expires_at);
@@ -94,6 +97,29 @@ let _ = registered;
 ```
 
 Auth failures expose the server `error` string and `code` on `SdkeyError` (`message` + `server_code`).
+
+## Hardware ID
+
+`get_hardware_id()` reads a stable OS machine identifier, then returns **SHA-256** of its UTF-8 bytes as **lowercase hex** (64 chars). It is **opt-in** — existing `hwid` params stay optional; nothing is auto-injected.
+
+| Platform | Source |
+|---|---|
+| Windows | `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` |
+| Linux | `/etc/machine-id`, else `/var/lib/dbus/machine-id` |
+| macOS | `IOPlatformUUID` (`ioreg`) |
+
+On unsupported platforms or when the ID is missing/empty, it returns `SdkeyError` — it does **not** invent a random ID.
+
+```rust
+use sdkey::{get_hardware_id, Client};
+
+// Desktop clients
+let hwid = get_hardware_id()?;
+client.validate("SDKY-XXXX-XXXX-XXXX-XXXX", Some(&hwid))?;
+
+// Web / omit HWID
+client.validate("SDKY-XXXX-XXXX-XXXX-XXXX", None)?;
+```
 
 ## Message vs error fields
 
@@ -165,6 +191,7 @@ Use `Client::with_http_post(...)` to inject a custom HTTP POST for tests or alte
 - `validate(license_key, hwid)` — sealed validate; `hwid: Option<&str>` (omit key when `None`); **always** decrypts then verifies Ed25519 before trusting `success`
 - `register` / `login` / `upgrade` — plaintext `/api/v1/client/*` (upgrade has no password)
 - `get_session()` / `clear_session()` — inspect or drop the local session
+- `get_hardware_id()` — free function; stable SHA-256 hex machine ID for desktop `hwid` params
 
 ### Errors
 

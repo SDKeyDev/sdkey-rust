@@ -7,10 +7,12 @@
 pub mod client;
 pub mod crypto;
 pub mod errors;
+pub mod hwid;
 pub mod types;
 
 pub use client::Client;
 pub use errors::{SdkeyError, SdkeyErrorCode};
+pub use hwid::get_hardware_id;
 pub use types::{
     ClientAuthLicense, ClientAuthResult, ClientAuthSession, ClientAuthUser, HttpPost, LoginOptions,
     RegisterOptions, SessionState, UpgradeOptions, ValidateResult,
